@@ -1,0 +1,16 @@
+{
+  "name": "BH2KMZ – Blasthole Excel to KML/KMZ",
+  "short_name": "BH2KMZ",
+  "description": "Convert blasthole Excel (UTM 45N, WGS 84) into colour-coded KML/KMZ with base strings. Works offline.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f6f8",
+  "theme_color": "#12324f",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
