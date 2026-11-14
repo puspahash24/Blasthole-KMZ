@@ -26,7 +26,7 @@
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   .chk{display:flex;align-items:center;gap:8px;margin:2px 0 10px;color:var(--ink);font-size:14px}
   .seg{display:flex;border:1px solid var(--line);border-radius:5px;overflow:hidden}
-  .seg label{flex:1;margin:0;text-align:center;padding:7px;cursor:pointer;color:var(--ink);font-size:14px}
+  .seg label{flex:1;margin:0;text-align:center;padding:7px 4px;cursor:pointer;color:var(--ink);font-size:13.5px}
   .seg input{display:none}
   .seg input:checked+span{font-weight:600;color:var(--acc)}
   .seg label:has(input:checked){background:var(--acc2)}
@@ -63,12 +63,31 @@
     <input type="file" id="fileX" accept=".xlsx,.xlsm,.xlsb,.xls" hidden>
     <label>Sheet</label>
     <select id="sheet" disabled><option>— select a file first —</option></select>
+    <label>ID source</label>
+    <div class="seg" id="modeSeg">
+      <label><input type="radio" name="mode" value="auto" checked><span>Auto</span></label>
+      <label><input type="radio" name="mode" value="raw"><span>Build from raw assays</span></label>
+      <label><input type="radio" name="mode" value="cols"><span>Existing ID column</span></label>
+    </div>
+    <div id="modeInfo" style="font-size:12.5px;color:var(--mut);margin-top:6px"></div>
+    <details style="margin-top:8px;font-size:12.5px;color:var(--mut)"><summary style="cursor:pointer">How the ID is built from raw data</summary>
+      <div style="padding:6px 2px;line-height:1.55">
+      <b>ID = Fe-SiO2-Al2O3-P_Type[P]</b> &nbsp;e.g. <code>67-0.9-1.1-0.03_HO</code><br>
+      Fe rounded to 0 dp, SiO2 &amp; Al2O3 to 1 dp, P to 2 dp. If Fe is blank or "nd", the ID is the hole number.<br>
+      <b>Type</b> (checked in this order, on rounded values):<br>
+      1. Fe &lt; 45 and SiO2 ≤ 12 → <b>OB</b> &nbsp;2. 45 ≤ Fe &lt; 58 → <b>SG</b> &nbsp;3. SiO2 &gt; 12 → <b>BHJ</b><br>
+      4. Ore Type starts "HO" → <b>HO</b><br>5. Al2O3 &lt; 2.5 and Ore Type is "BD…", or its 1st letter ≠ B and 2nd letter ≠ D → <b>DR</b><br>
+      6. 2.5 ≤ Al2O3 &lt; 4.6 → <b>W1</b> &nbsp;7. otherwise → <b>W2</b><br>
+      <b>P flag</b>: raw P &gt; 0.19 and type ≠ OB → "P" appended (DRP, W1P, SGP, HOP, W2P, BHJP).
+      </div></details>
+    <div id="colBox">
     <label>Columns (Z is always written as 0)</label>
     <div class="row">
       <div><label style="margin-top:0">X</label><input type="text" id="cx" value="AJ"></div>
       <div><label style="margin-top:0">Y</label><input type="text" id="cy" value="AK"></div>
       <div><label style="margin-top:0">ID</label><input type="text" id="cid" value="AM"></div>
       <div><label style="margin-top:0">Header rows</label><input type="number" id="hdr" value="1" min="0"></div>
+    </div>
     </div>
 
     <h2 style="margin-top:20px"><span class="step">2</span>Base string (optional)</h2>
@@ -141,7 +160,7 @@ var BH = (function () {
     ["style_green",  "ff00ff00", ["W1", "W1P"],  "Green",  "#00ff00"],
     ["style_cyan",   "ffffff00", ["SG", "SGP"],  "Cyan",   "#00ffff"],
     ["style_red",    "ff0000ff", ["HO", "HOP"],  "Red",    "#ff0000"],
-    ["style_pink",   "ffB469FF", ["BHJ", "OB"],  "Pink",   "#ff69b4"],
+    ["style_pink",   "ffB469FF", ["BHJ", "OB", "BHJP"],  "Pink",   "#ff69b4"],
     ["style_yellow", "ff00ffff", ["W2", "W2P"],  "Yellow", "#ffff00"]
   ];
   var GREY = ["style_grey", "ff808080", [], "Grey", "#808080"];
@@ -306,11 +325,91 @@ var BH = (function () {
     });
   }
 
+
+  /* ===== Raw-sheet support: replicate the Excel ID formula (columns AJ:BD) ===== */
+  function norm(h) { return String(h == null ? "" : h).toLowerCase().replace(/[\s._\/\\-]+/g, ""); }
+  var RAW_HDR = { x: ["x", "easting"], y: ["y", "northing"], hole: ["holeno", "hole", "holeid", "bhno"],
+    ore: ["oretype", "ore"], fe: ["fe", "fe%"], si: ["sio2", "sio2%"], al: ["al2o3", "al2o3%"], p: ["p", "p%"] };
+
+  /* find header row (first 15 rows) and first occurrence of each raw column */
+  function findRawColumns(rows) {
+    for (var r = 0; r < Math.min(rows.length, 15); r++) {
+      var row = rows[r] || [], map = {};
+      for (var c = 0; c < row.length; c++) {
+        var h = norm(row[c]);
+        for (var k in RAW_HDR) if (map[k] === undefined && RAW_HDR[k].indexOf(h) >= 0) map[k] = c;
+      }
+      if (["x", "y", "hole", "fe", "si", "al", "p"].every(function (k) { return map[k] !== undefined; }))
+        return { headerRow: r, cols: map };
+    }
+    return null;
+  }
+
+  /* Excel ROUND (half away from zero, on the 15-significant-digit value) */
+  function xround(x, d) {
+    var s = Math.abs(x).toPrecision(15);
+    var v = Number(Math.round(Number(s + "e" + d)) + "e-" + d);
+    return x < 0 ? -v : v;
+  }
+  /* assay value: number | "nd" (text / not determined) | 0 (blank) */
+  function assay(v) {
+    if (v == null || v === "") return 0;
+    if (typeof v === "number") return v;
+    var f = Number(String(v).replace(/,/g, "").trim());
+    return String(v).trim() !== "" && !isNaN(f) ? f : "nd";
+  }
+  /* Excel comparison semantics: any text is greater than any number */
+  function LT(a, b) { return typeof a === "string" ? false : a < b; }
+  function LE(a, b) { return typeof a === "string" ? false : a <= b; }
+  function GT(a, b) { return typeof a === "string" ? true : a > b; }
+  function GE(a, b) { return typeof a === "string" ? true : a >= b; }
+  function rnd(v, d) { return v === "nd" ? "nd" : xround(v, d); }
+
+  /* Material type - same nested IF as column AY ('matp') */
+  function matType(fe, si, al, oreType) {
+    var o = String(oreType == null ? "" : oreType).toUpperCase(), A = o.charAt(0), B = o.charAt(1);
+    if (LT(fe, 45) && LE(si, 12)) return "OB";
+    if (GE(fe, 45) && LT(fe, 58)) return "SG";
+    if (GT(si, 12)) return "BHJ";
+    if (A === "H" && B === "O") return "HO";
+    if (A === "B" && B === "D" && LT(al, 2.5)) return "DR";
+    if (A !== "B" && B !== "D" && LT(al, 2.5)) return "DR";
+    if (GE(al, 2.5) && LT(al, 4.6)) return "W1";
+    return "W2";
+  }
+
+  /* Full ID - same as column AM:  Fe-SiO2-Al2O3-P_matp(+P if phosphorus > 0.19 and not OB) */
+  function makeId(hole, feRaw, siRaw, alRaw, pRaw, oreType) {
+    var fe = rnd(assay(feRaw), 0), si = rnd(assay(siRaw), 1), al = rnd(assay(alRaw), 1), p = rnd(assay(pRaw), 2);
+    var m = matType(fe, si, al, oreType);
+    var pr = assay(pRaw), flag = (pr !== "nd" && pr > 0.19 && m !== "OB") ? "P" : "";
+    var h = String(hole == null ? "" : hole).trim();
+    if (fe === 0 || fe === "nd") return h + flag;      // no Fe assay -> hole number
+    return fe + "-" + si + "-" + al + "-" + p + "_" + m + flag;
+  }
+
+  function readRawPoints(rows) {
+    var f = findRawColumns(rows);
+    if (!f) throw new Error("Raw columns not found (need headers X, Y, Hole No., Ore Type, Fe, SiO2, Al2O3, P).");
+    var c = f.cols, pts = [], skipped = 0, holeOnly = 0;
+    for (var r = f.headerRow + 1; r < rows.length; r++) {
+      var row = rows[r] || [];
+      var x = num(row[c.x]), y = num(row[c.y]), hole = row[c.hole];
+      var holeEmpty = hole == null || String(hole).trim() === "";
+      if (!x && !y && holeEmpty) continue;                          // blank row
+      if (!x || !y || holeEmpty || x < 100000 || x > 900000 || y < 0 || y > 10000000) { skipped++; continue; }
+      var id = makeId(hole, row[c.fe], row[c.si], row[c.al], row[c.p], c.ore !== undefined ? row[c.ore] : "");
+      if (id.indexOf("_") < 0) holeOnly++;
+      pts.push([id, x, y]);
+    }
+    return { points: pts, skipped: skipped, holeOnly: holeOnly, headerRow: f.headerRow, cols: c };
+  }
+
   function counts(points) {
     var c = {}; points.forEach(function (p) { var s = classify(p[0]); c[s] = (c[s] || 0) + 1; }); return c;
   }
 
-  return { ICONS: ICONS, CATEGORIES: CATEGORIES, GREY: GREY, classify: classify, utmToLatLon: utmToLatLon, colIdx: colIdx,
+  return { findRawColumns: findRawColumns, readRawPoints: readRawPoints, makeId: makeId, matType: matType, xround: xround, ICONS: ICONS, CATEGORIES: CATEGORIES, GREY: GREY, classify: classify, utmToLatLon: utmToLatLon, colIdx: colIdx,
            readPoints: readPoints, splitKml: splitKml, buildKml: buildKml, loadBase: loadBase, counts: counts };
 })();
 if (typeof module !== "undefined") module.exports = BH;
@@ -334,7 +433,7 @@ if (typeof module !== "undefined") module.exports = BH;
   /* legend */
   function drawLegend(c){
     var h="";BH.CATEGORIES.concat([BH.GREY]).forEach(function(k){
-      var lbl=k[2].length?k[2].join(" / "):"Other";
+      var lbl=k[2].length?k[2].join(" / "):"Other / no assay";
       h+='<div><span class="sw" style="background:'+k[4]+'"></span>'+k[3]+" — "+lbl+'<span class="cnt">'+(c?(c[k[0]]||0):"")+"</span></div>";
     });$("legend").innerHTML=h}
   drawLegend();
@@ -373,14 +472,30 @@ if (typeof module !== "undefined") module.exports = BH;
       }catch(e){log("✘ "+e.message,"err")}
     },10);
   }
+  function mode(){return document.querySelector("input[name=mode]:checked").value}
+  document.querySelectorAll("input[name=mode]").forEach(function(r){r.addEventListener("change",parsePoints)});
+  function colName(i){var s="";i++;while(i>0){var m=(i-1)%26;s=String.fromCharCode(65+m)+s;i=Math.floor((i-1)/26)}return s}
   function parsePoints(){
     if(!state.rows)return;
+    var md=mode(),raw=BH.findRawColumns(state.rows),use=md==="raw"||(md==="auto"&&raw);
+    $("colBox").style.display=use?"none":"";
     try{
-      var r=BH.readPoints(state.rows,$("cx").value,$("cy").value,$("cid").value,parseInt($("hdr").value||"0",10));
+      var r,info;
+      if(use){
+        r=BH.readRawPoints(state.rows);var c=r.cols;
+        info="Building IDs from raw columns — Hole "+colName(c.hole)+", X "+colName(c.x)+", Y "+colName(c.y)+
+             ", Ore Type "+(c.ore!==undefined?colName(c.ore):"(none)")+", Fe "+colName(c.fe)+", SiO2 "+colName(c.si)+
+             ", Al2O3 "+colName(c.al)+", P "+colName(c.p)+" (header row "+(r.headerRow+1)+")";
+      }else{
+        r=BH.readPoints(state.rows,$("cx").value,$("cy").value,$("cid").value,parseInt($("hdr").value||"0",10));
+        info="Using existing ID column "+$("cid").value.toUpperCase()+(md==="auto"?" (raw assay headers not found)":"");
+      }
+      $("modeInfo").textContent=info;
       state.points=r.points;state.skipped=r.skipped;
-      log("Sheet '"+$("sheet").value+"': "+r.points.length+" points"+(r.skipped?", "+r.skipped+" rows skipped (missing/invalid X, Y or ID)":""),r.points.length?"ok":"err");
+      log("Sheet '"+$("sheet").value+"': "+r.points.length+" points"+(r.skipped?", "+r.skipped+" rows skipped (missing/invalid X, Y or hole no.)":"")+
+          (r.holeOnly?", "+r.holeOnly+" without Fe assay (labelled with hole no., grey)":""),r.points.length?"ok":"err");
       drawLegend(BH.counts(r.points));
-    }catch(e){state.points=null;log("✘ "+e.message,"err")}
+    }catch(e){state.points=null;$("modeInfo").textContent="";log("✘ "+e.message,"err")}
     update();
   }
 
