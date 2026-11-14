@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blasthole Excel → KML/KMZ Converter</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#12324f">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
   :root{--bg:#f4f6f8;--card:#fff;--ink:#1d2733;--mut:#64707d;--line:#dfe4ea;--acc:#0b5cad;--acc2:#e8f1fb;--ok:#1f7a3a;--err:#b42318}
   *{box-sizing:border-box}
@@ -11,6 +15,8 @@
   header{background:#12324f;color:#fff;padding:16px 24px}
   header h1{margin:0;font-size:19px;font-weight:600}
   header p{margin:2px 0 0;font-size:12.5px;opacity:.8}
+  header{display:flex;align-items:center;gap:16px}
+  #install{display:none;margin:0 0 0 auto;width:auto;padding:8px 14px;font-size:13.5px;background:#fff;color:#12324f}
   main{max-width:1100px;margin:20px auto;padding:0 16px;display:grid;grid-template-columns:1fr 1fr;gap:16px}
   @media(max-width:860px){main{grid-template-columns:1fr}}
   .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px}
@@ -52,8 +58,11 @@
 </head>
 <body>
 <header>
+  <div>
   <h1>Blasthole Excel → KML / KMZ Converter</h1>
   <p>UTM Zone 45N · WGS 84 · Pins coloured by ID suffix · Runs fully in your browser, nothing is uploaded</p>
+  </div>
+  <button id="install" title="Install as an app on this computer">⬇ Install app</button>
 </header>
 
 <main>
@@ -585,6 +594,18 @@ if (typeof module !== "undefined") module.exports = BH;
       log("✔ "+a.download+" — "+state.points.length+" blastholes"+(useBase?" + base string ("+state.bname+")":"")+" ("+(blob.size/1024).toFixed(0)+" KB)","ok");
     }).catch(function(e){log("✘ "+e.message,"err")}).then(function(){$("go").disabled=false});
   });
+})();
+</script>
+<script>
+/* PWA: offline cache + install button */
+if ("serviceWorker" in navigator && location.protocol !== "file:") {
+  navigator.serviceWorker.register("sw.js").catch(function(e){console.log("SW:",e)});
+}
+(function(){
+  var deferred=null,btn=document.getElementById("install");
+  window.addEventListener("beforeinstallprompt",function(e){e.preventDefault();deferred=e;btn.style.display="block"});
+  btn.addEventListener("click",function(){if(!deferred)return;deferred.prompt();deferred.userChoice.then(function(){deferred=null;btn.style.display="none"})});
+  window.addEventListener("appinstalled",function(){btn.style.display="none"});
 })();
 </script>
 </body>
