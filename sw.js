@@ -1,5 +1,5 @@
 /* Offline support: page is fetched fresh when online (so updates appear), cached copy used when offline */
-const CACHE = "blasthole-kmz-v3";
+const CACHE = "blasthole-kmz-v4";
 const FILES = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {

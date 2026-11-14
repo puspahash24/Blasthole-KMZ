@@ -808,6 +808,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <label class="chk"><input type="checkbox" id="useBase" checked> Include base string file</label>
       <div class="drop" id="dropB"><div class="fn" id="fnB">Drop KML/KMZ here or click to browse</div><small>e.g. nk-utm_face.kmz</small></div>
       <input type="file" id="fileB" accept=".kml,.kmz" hidden>
+      <div class="info" id="baseSaved"></div>
     </section>
 
     <section class="card">
@@ -1254,14 +1255,45 @@ if (typeof module !== "undefined") module.exports = BH;
   function countTypes(fs) { var c = { pt: 0, ln: 0, pg: 0 }; fs.forEach(function (f) { c[f.t]++; }); return c; }
 
   /* ------------------------------------------------------------------ map */
-  var map = L.map("map", { zoomControl: false, preferCanvas: true, maxZoom: 21, minZoom: 3, zoomSnap: 0.5, wheelPxPerZoomLevel: 90 })
+  var map = L.map("map", { zoomControl: false, preferCanvas: true, maxZoom: 22, minZoom: 3, zoomSnap: 0.5, wheelPxPerZoomLevel: 90 })
     .setView([22.135, 85.48], 13);
-  var esriSat = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    { maxNativeZoom: 19, maxZoom: 21, attribution: "Imagery © Esri, Maxar, Earthstar Geographics" });
+  /* Tile layer that never goes blank: if a tile is missing at this zoom, the nearest lower-zoom
+     tile is shown enlarged instead (blurry but continuous). */
+  var FallbackTiles = L.TileLayer.extend({
+    createTile: function (coords, done) {
+      var tile = document.createElement("div"), img = document.createElement("img"), self = this, dz = 0;
+      tile.style.overflow = "hidden";
+      img.alt = ""; img.setAttribute("role", "presentation");
+      img.style.position = "absolute"; img.style.maxWidth = "none"; img.style.left = "0"; img.style.top = "0";
+      img.style.width = img.style.height = "256px";
+      tile.appendChild(img);
+      function show(d) {
+        var px = coords.x >> d, py = coords.y >> d, sz = 256 << d;
+        img.style.width = img.style.height = sz + "px";
+        img.style.left = -((coords.x - (px << d)) * 256) + "px";
+        img.style.top = -((coords.y - (py << d)) * 256) + "px";
+        img.src = self.getTileUrl({ x: px, y: py, z: coords.z - d });
+      }
+      img.onload = function () { done(null, tile); };
+      img.onerror = function () {
+        dz++;
+        if (dz > 8 || coords.z - dz < 1) { done(null, tile); return; }
+        show(dz);
+      };
+      show(0);
+      return tile;
+    },
+    getTileUrl: function (c) {
+      return L.Util.template(this._url, L.extend({ s: this._getSubdomain(c), x: c.x, y: c.y, z: c.z }, this.options));
+    }
+  });
+  var IMG = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}?blankTile=false";
+  var SAT_OPTS = { maxNativeZoom: 18, maxZoom: 22, attribution: "Imagery © Esri, Maxar, Earthstar Geographics" };
+  var esriSat = new FallbackTiles(IMG, SAT_OPTS);
   var esriLbl = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
-    { maxNativeZoom: 19, maxZoom: 21, pane: "overlayPane" });
-  var osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxNativeZoom: 19, maxZoom: 21, attribution: "© OpenStreetMap contributors" });
-  var satLabels = L.layerGroup([L.tileLayer(esriSat._url, esriSat.options), esriLbl]);
+    { maxNativeZoom: 18, maxZoom: 22, pane: "overlayPane" });
+  var osm = new FallbackTiles("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxNativeZoom: 19, maxZoom: 22, attribution: "© OpenStreetMap contributors" });
+  var satLabels = L.layerGroup([new FallbackTiles(IMG, SAT_OPTS), esriLbl]);
   var blank = L.layerGroup();
   esriSat.addTo(map);
   L.control.layers({ "Satellite": esriSat, "Satellite + places": satLabels, "Street map": osm, "No background": blank }, null, { position: "topright" }).addTo(map);
@@ -1578,19 +1610,63 @@ if (typeof module !== "undefined") module.exports = BH;
     styleGen(); refreshGroups(); fitData(true);
   }
 
-  function loadBaseFile(f) {
-    $("fnB").textContent = f.name + " — reading…";
-    readBuf(f).then(function (u) { return BH.loadBase(u, JSZip); }).then(function (b) {
-      var s = BH.splitKml(b.text); state.base = { split: s, extras: b.extras }; state.bname = f.name;
+  /* small IndexedDB key-value store: remembers the last base string between visits */
+  function idb() {
+    return new Promise(function (res, rej) {
+      if (!window.indexedDB) return rej(new Error("no IndexedDB"));
+      var r = indexedDB.open("bh2kmz", 1);
+      r.onupgradeneeded = function () { r.result.createObjectStore("kv"); };
+      r.onsuccess = function () { res(r.result); }; r.onerror = function () { rej(r.error); };
+    });
+  }
+  function kv(mode, key, val) {
+    return idb().then(function (db) {
+      return new Promise(function (res, rej) {
+        var tx = db.transaction("kv", mode === "get" ? "readonly" : "readwrite"), st = tx.objectStore("kv"), rq;
+        rq = mode === "get" ? st.get(key) : mode === "del" ? st.delete(key) : st.put(val, key);
+        tx.oncomplete = function () { res(rq.result); }; tx.onerror = function () { rej(tx.error); };
+      });
+    });
+  }
+  function showSaved(name, when) {
+    var el = $("baseSaved");
+    if (!name) { el.innerHTML = ""; return; }
+    el.innerHTML = "Remembered for next time" + (when ? " (saved " + new Date(when).toLocaleDateString() + ")" : "") +
+      ' · <a href="#" id="forgetBase">Forget</a>';
+    $("forgetBase").onclick = function (e) {
+      e.preventDefault(); kv("del", "base");
+      state.base = null; gen.base.features = []; state.bname = "";
+      $("fnB").textContent = "Drop KML/KMZ here or click to browse"; showSaved(null); refreshGroups();
+      log("Base string forgotten");
+    };
+  }
+  function loadBaseBytes(name, u, saved) {
+    $("fnB").textContent = name + " — reading…";
+    return BH.loadBase(u, JSZip).then(function (b) {
+      var s = BH.splitKml(b.text); state.base = { split: s, extras: b.extras }; state.bname = name;
       gen.base.features = parseKmlText(b.text);
-      $("fnB").textContent = f.name; $("useBase").checked = true;
+      $("fnB").textContent = name;
       var c = countTypes(gen.base.features);
-      log("Base string loaded: " + f.name + " (" + c.ln + " lines" + (c.pg ? ", " + c.pg + " polygons" : "") + (c.pt ? ", " + c.pt + " points" : "") + ")", "ok");
+      log((saved ? "Base string restored from last session: " : "Base string loaded: ") + name + " (" + c.ln + " lines" + (c.pg ? ", " + c.pg + " polygons" : "") + (c.pt ? ", " + c.pt + " points" : "") + ")", "ok");
+      if (!saved) {
+        var when = Date.now();
+        kv("put", "base", { name: name, bytes: u, saved: when }).then(function () { showSaved(name, when); })
+          .catch(function () { showSaved(null); log("Note: browser storage unavailable — base string won't be remembered"); });
+      } else showSaved(name, saved.saved);
       refreshGroups(); fitData(true);
-    }).catch(function (e) { state.base = null; gen.base.features = []; $("fnB").textContent = "Could not read base file"; log("✘ " + e.message, "err"); refreshGroups(); });
+    });
+  }
+  function loadBaseFile(f) {
+    readBuf(f).then(function (u) { $("useBase").checked = true; saveUseBase(); return loadBaseBytes(f.name, u, null); })
+      .catch(function (e) { state.base = null; gen.base.features = []; $("fnB").textContent = "Could not read base file"; log("✘ " + e.message, "err"); refreshGroups(); });
   }
   wireDrop("dropB", "fileB", function (fs) { loadBaseFile(fs[0]); });
-  $("useBase").addEventListener("change", refreshGroups);
+  function saveUseBase() { try { localStorage.setItem("bh2kmz.useBase", $("useBase").checked ? "1" : "0"); } catch (e) {} }
+  try { if (localStorage.getItem("bh2kmz.useBase") === "0") $("useBase").checked = false; } catch (e) {}
+  $("useBase").addEventListener("change", function () { saveUseBase(); refreshGroups(); });
+  kv("get", "base").then(function (rec) {
+    if (rec && rec.bytes && !state.base) return loadBaseBytes(rec.name, rec.bytes instanceof Uint8Array ? rec.bytes : new Uint8Array(rec.bytes), rec);
+  }).catch(function () {});
 
   $("go").addEventListener("click", function () {
     if (!dateStr()) { log("✘ Choose a date", "err"); return; }
